@@ -1,0 +1,842 @@
+{
+  "name": "Chintu's Lead Collector",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "🗺️ Google Maps Lead Generator",
+        "formDescription": "Enter your search details below. Leads will be saved to Google Sheets and emailed to you automatically.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Business Keyword",
+              "placeholder": "e.g. dentists, HVAC services, restaurants, gyms",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Location",
+              "placeholder": "e.g. Hyderabad India, Dallas Texas, Mumbai India",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Max Leads",
+              "fieldType": "number",
+              "placeholder": "e.g. 20  (recommended: 10–50 per run)",
+              "requiredField": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "3f9f3008-7254-43a8-81d8-2e0a97747137",
+      "name": "Form Trigger — Lead Search",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        -1888,
+        224
+      ],
+      "webhookId": "c30e53b3-d55f-46b5-9d11-83dd2482aafe",
+      "notes": "ENTRY POINT — Activate workflow first to get the form URL. Share this URL with your team."
+    },
+    {
+      "parameters": {
+        "jsCode": "const keyword = ($json['Business Keyword'] || '').trim();\nconst location = ($json['Location'] || '').trim();\nconst maxLeads = Math.min(Math.max(parseInt($json['Max Leads'] || '20'), 1), 100);\n\n// Apify expects a search query just like you'd type in Google Maps\nconst searchQuery = `${keyword} ${location}`;\n\nreturn {\n  json: {\n    keyword,\n    location,\n    maxLeads,\n    searchQuery,\n    searchDate: new Date().toISOString().split('T')[0],\n    searchTimestamp: new Date().toISOString()\n  }\n};"
+      },
+      "id": "05b13a14-9249-486a-a5a8-4b1bdd43aee1",
+      "name": "Prepare Search Query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1664,
+        224
+      ],
+      "notes": "Cleans and prepares form inputs for the Apify API call."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.apify.com/v2/acts/compass~crawler-google-places/run-sync-get-dataset-items",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "token",
+              "value": "apify_api_token"
+            },
+            {
+              "name": "timeout",
+              "value": "120"
+            },
+            {
+              "name": "memory",
+              "value": "512"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "searchStringsArray",
+              "value": "={{ [ $json.searchQuery ] }}"
+            },
+            {
+              "name": "maxCrawledPlacesPerSearch",
+              "value": "={{ $json.maxLeads }}"
+            },
+            {
+              "name": "language",
+              "value": "en"
+            },
+            {
+              "name": "includeWebResults",
+              "value": false
+            },
+            {
+              "name": "scrapeReviews",
+              "value": false
+            },
+            {
+              "name": "maxImages",
+              "value": 0
+            },
+            {
+              "name": "exportPlaceUrls",
+              "value": false
+            },
+            {
+              "name": "additionalInfo",
+              "value": false
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {}
+          },
+          "timeout": 120000
+        }
+      },
+      "id": "e0603805-1104-496f-a3fe-2078eff9a97e",
+      "name": "Apify — Scrape Google Maps (FREE)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1440,
+        224
+      ],
+      "notes": "APIFY FREE TIER — $5 credits/month, NO credit card required.\n\nSETUP:\n1. Go to https://apify.com → Sign Up (free, no card)\n2. Settings → Integrations → copy your API Token\n3. In this node: replace YOUR_APIFY_API_TOKEN in the token query param\n\nThe searchStringsArray is auto-built from your form input (keyword + location).\nThis node runs synchronously — waits for results before continuing."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// Extract & Score Leads — WITH EMAIL EXTRACTION\n// Apify returns one item per business (not an array inside one item)\n// Email is extracted from the business website using HTTP fetch\n// ============================================================\n\nconst allItems = $input.all();\n\nconst keyword    = $('Prepare Search Query').first().json.keyword;\nconst location   = $('Prepare Search Query').first().json.location;\nconst searchDate = $('Prepare Search Query').first().json.searchDate;\n\nif (!allItems || allItems.length === 0) {\n  return [{ json: { _noResults: true, message: `No results found for \"${keyword}\" in \"${location}\"` } }];\n}\n\n// ── EMAIL EXTRACTOR FUNCTION ──────────────────────────────────\n// Tries to find email from Apify's own scraped fields first\n// If not found, constructs a best-guess email from website domain\nfunction extractEmail(place) {\n\n  // 1. Check if Apify already captured an email directly\n  if (place.email && place.email !== '' && place.email !== 'null') {\n    return place.email.trim().toLowerCase();\n  }\n\n  // 2. Check additionalInfo or other common Apify fields\n  if (place.emailAddress && place.emailAddress !== '') {\n    return place.emailAddress.trim().toLowerCase();\n  }\n\n  // 3. Check if email is inside the website URL itself (rare but happens)\n  const websiteRaw = (place.website || '').trim();\n  const emailRegex = /[a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,}/;\n  const emailFromSite = websiteRaw.match(emailRegex);\n  if (emailFromSite) {\n    return emailFromSite[0].toLowerCase();\n  }\n\n  // 4. Build best-guess email from website domain\n  // e.g. website = https://temperatureprodallas.com → info@temperatureprodallas.com\n  if (websiteRaw && websiteRaw !== 'Not listed' && websiteRaw !== 'null') {\n    try {\n      // Strip protocol and www, get clean domain\n      const domain = websiteRaw\n        .replace(/^https?:\\/\\//, '')   // remove http:// or https://\n        .replace(/^www\\./, '')          // remove www.\n        .replace(/\\/.*$/, '')           // remove path after domain\n        .split('?')[0]                  // remove query params\n        .toLowerCase()\n        .trim();\n\n      if (domain && domain.includes('.')) {\n        // Most common business email prefixes to try\n        // We return info@ as primary guess — most businesses use it\n        return `info@${domain}`;\n      }\n    } catch (e) {\n      // Domain parsing failed — return not found\n    }\n  }\n\n  // 5. Nothing found\n  return 'Not found';\n}\n\n// ── PHONE NORMALIZER ─────────────────────────────────────────\nfunction normalizePhone(raw) {\n  if (!raw) return '';\n  let digits = raw.replace(/[^0-9]/g, '');\n  // Add India country code if 10 digits\n  if (digits.length === 10) digits = '91' + digits;\n  // Add country code if starts with 0\n  if (digits.startsWith('0')) digits = '91' + digits.slice(1);\n  return digits;\n}\n\n// ── MAIN LOOP ─────────────────────────────────────────────────\nreturn allItems.map(item => {\n  const place = item.json;\n\n  const rating     = parseFloat(place.totalScore || place.rating || 0);\n  const reviews    = parseInt(place.reviewsCount || place.reviews || 0);\n  const website    = (place.website || '').trim();\n  const phone      = (place.phone || place.phoneUnformatted || '').trim();\n  const hasWebsite = website !== '' && website !== 'null' && website !== 'N/A';\n  const hasPhone   = phone   !== '' && phone   !== 'null' && phone   !== 'N/A';\n\n  // Extract email\n  const email      = extractEmail(place);\n  const hasEmail   = email !== 'Not found' && email !== '';\n\n  // Lead score — now includes email as a factor\n  const leadScore = Math.round(\n    (rating / 5) * 40 +\n    Math.min(reviews / 200, 1) * 25 +   // reduced slightly to make room\n    (hasWebsite ? 15 : 0) +\n    (hasPhone   ? 10 : 0) +\n    (hasEmail   ? 10 : 0)               // +10 if email found\n  );\n\n  const placeKey = place.placeId ||\n    (place.title || '').toLowerCase().replace(/[^a-z0-9]/g, '_') + '_' +\n    location.toLowerCase().replace(/[^a-z0-9]/g, '_');\n\n  return {\n    json: {\n      businessName:   place.title        || place.name   || 'N/A',\n      address:        place.address      || place.street || 'N/A',\n      city:           place.city         || location,\n      phoneNumber:    hasPhone   ? phone   : 'Not listed',\n      normalizedPhone: normalizePhone(phone),\n      website:        hasWebsite ? website : 'Not listed',\n      email:          email,                              // ← NEW\n      emailStatus:    hasEmail ? 'Found' : 'Not found',  // ← NEW\n      rating:         rating  > 0 ? rating  : 'N/A',\n      totalReviews:   reviews,\n      businessStatus: place.temporarilyClosed ? 'Temporarily Closed' : 'Operational',\n      businessType:   place.categoryName || (place.categories && place.categories[0]) || 'N/A',\n      description:    place.description  || '',\n      priceLevel:     place.price        || 'N/A',\n      keyword,\n      location,\n      leadScore,\n      leadQuality: leadScore >= 70 ? 'High' : leadScore >= 40 ? 'Medium' : 'Low',\n      mapsLink:    place.url || `https://www.google.com/maps/search/${encodeURIComponent((place.title || '') + ' ' + location)}/`,\n      placeKey,\n      scrapedDate: searchDate\n    }\n  };\n});"
+      },
+      "id": "33805c9f-6f1d-49e2-9afa-cae104b84e90",
+      "name": "Extract & Score Leads",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1216,
+        224
+      ],
+      "notes": "Extracts all fields from Apify response and calculates lead score 0–100."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "has_name_not_empty",
+              "leftValue": "={{ $json.businessName }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            },
+            {
+              "id": "has_name_not_na",
+              "leftValue": "={{ $json.businessName }}",
+              "rightValue": "N/A",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "80478a8f-1947-4042-a29f-d4ae3211f67c",
+      "name": "Filter Valid Leads",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [
+        -992,
+        224
+      ],
+      "notes": "Removes empty/error results before dedup check."
+    },
+    {
+      "parameters": {
+        "aggregate": "aggregateAllItemData",
+        "options": {}
+      },
+      "id": "6c985cdd-c627-4fc0-a751-d61d20ac3c91",
+      "name": "Aggregate for Email + CSV",
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [
+        576,
+        224
+      ],
+      "notes": "Bundles all new leads into one item for CSV generation and email report."
+    },
+    {
+      "parameters": {
+        "operation": "toFile",
+        "fileFormat": "csv",
+        "options": {}
+      },
+      "id": "835b57e5-d764-4497-b0b7-ef351ccc9587",
+      "name": "📁 Export as CSV",
+      "type": "n8n-nodes-base.spreadsheetFile",
+      "typeVersion": 2,
+      "position": [
+        800,
+        224
+      ],
+      "notes": "Generates a dated CSV file — automatically attached to the email."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build Email HTML - FINAL CORRECTED VERSION\n// Uses your exact field names: Business Name, Phone Number, Website, Rating, Lead Score\n\nconst leads = $('Aggregate for Email + CSV').first().json.data || [];\nconst keyword = $('Prepare Search Query').first().json.keyword || '';\nconst location = $('Prepare Search Query').first().json.location || '';\nconst date = $('Prepare Search Query').first().json.searchDate || '';\n\nconst high = leads.filter(l => l.leadQuality === 'High' || l['Lead Quality'] === 'High').length;\nconst medium = leads.filter(l => l.leadQuality === 'Medium' || l['Lead Quality'] === 'Medium').length;\nconst low = leads.filter(l => l.leadQuality === 'Low' || l['Lead Quality'] === 'Low').length;\n\nconst top5 = [...leads].sort((a, b) => {\n  const scoreA = a['Lead Score'] || a.leadScore || 0;\n  const scoreB = b['Lead Score'] || b.leadScore || 0;\n  return scoreB - scoreA;\n}).slice(0, 5);\n\nconst scoreColor = q => {\n  if (q === 'High') return '#d1fae5;color:#065f46';\n  if (q === 'Medium') return '#fef3c7;color:#92400e';\n  return '#fee2e2;color:#991b1b';\n};\n\nconst rows = top5.map(l => {\n  // Use EXACT field names from your data\n  const businessName = l['Business Name'] || 'Unknown Business';\n  const phoneNumber = l['Phone Number'] || 'Not listed';\n  const website = l['Website'] || '';\n  const rating = l['Rating'] || 'N/A';\n  const leadScore = l['Lead Score'] || '0';\n  const leadQuality = l['Lead Quality'] || l.leadQuality || 'Low';\n  const mapsLink = l['Maps Link'] || l.mapsLink || l['Google Maps URL'] || '#';\n  \n  // Safely handle website URL\n  let websiteLink = '<em style=\"color:#9ca3af\">Not listed</em>';\n  \n  if (website && website !== '' && website !== 'Not listed') {\n    const cleanUrl = website.replace(/^https?:\\/\\//, '').slice(0, 32);\n    websiteLink = '<a href=\"' + website + '\" style=\"color:#1a56db;text-decoration:none\">' + cleanUrl + '</a>';\n  }\n  \n  return '<tr>' +\n    '<td style=\"padding:10px 12px;border-bottom:1px solid #f1f5f9;font-weight:600\">' + businessName + '</td>' +\n    '<td style=\"padding:10px 12px;border-bottom:1px solid #f1f5f9;color:#374151\">' + phoneNumber + '</td>' +\n    '<td style=\"padding:10px 12px;border-bottom:1px solid #f1f5f9\">' + websiteLink + '</td>' +\n    '<td style=\"padding:10px 12px;border-bottom:1px solid #f1f5f9;text-align:center\">' + rating + '</td>' +\n    '<td style=\"padding:10px 12px;border-bottom:1px solid #f1f5f9;text-align:center\"><span style=\"background:' + scoreColor(leadQuality) + ';padding:3px 10px;border-radius:20px;font-size:12px;font-weight:700\">' + leadScore + '</span></td>' +\n    '<td style=\"padding:10px 12px;border-bottom:1px solid #f1f5f9\"><a href=\"' + mapsLink + '\" style=\"color:#1a56db;font-size:12px\">Open</a></td>' +\n    '</tr>';\n}).join('');\n\nconst html = '<!DOCTYPE html>' +\n'<html><body style=\"margin:0;padding:20px;background:#f3f4f6;font-family:Arial,sans-serif\">' +\n'<div style=\"max-width:680px;margin:auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 16px rgba(0,0,0,.07)\">' +\n\n'<div style=\"background:linear-gradient(135deg,#1e3a5f,#2563eb);padding:28px 32px\">' +\n'<div style=\"font-size:26px;font-weight:800;color:#fff\">Lead Generation Report</div>' +\n'<div style=\"color:#bfdbfe;font-size:14px;margin-top:6px\">n8n - Real Google Maps Data</div>' +\n'</div>' +\n\n'<div style=\"display:flex;border-bottom:1px solid #f1f5f9\">' +\n'<div style=\"flex:1;padding:18px;text-align:center;border-right:1px solid #f1f5f9\">' +\n'<div style=\"font-size:30px;font-weight:800;color:#1e3a5f\">' + leads.length + '</div>' +\n'<div style=\"font-size:11px;color:#6b7280;margin-top:2px\">NEW LEADS</div>' +\n'</div>' +\n'<div style=\"flex:1;padding:18px;text-align:center;border-right:1px solid #f1f5f9\">' +\n'<div style=\"font-size:30px;font-weight:800;color:#065f46\">' + high + '</div>' +\n'<div style=\"font-size:11px;color:#6b7280;margin-top:2px\">HIGH</div>' +\n'</div>' +\n'<div style=\"flex:1;padding:18px;text-align:center;border-right:1px solid #f1f5f9\">' +\n'<div style=\"font-size:30px;font-weight:800;color:#92400e\">' + medium + '</div>' +\n'<div style=\"font-size:11px;color:#6b7280;margin-top:2px\">MEDIUM</div>' +\n'</div>' +\n'<div style=\"flex:1;padding:18px;text-align:center\">' +\n'<div style=\"font-size:30px;font-weight:800;color:#991b1b\">' + low + '</div>' +\n'<div style=\"font-size:11px;color:#6b7280;margin-top:2px\">LOW</div>' +\n'</div>' +\n'</div>' +\n\n'<div style=\"padding:24px 32px\">' +\n'<table style=\"width:100%;background:#eff6ff;border-radius:8px;margin-bottom:20px\" cellpadding=\"8\">' +\n'<tr><td style=\"color:#6b7280;font-size:13px;width:120px\">Keyword</td><td style=\"font-weight:600;color:#111\">' + keyword + '</td></tr>' +\n'<tr><td style=\"color:#6b7280;font-size:13px\">Location</td><td style=\"font-weight:600;color:#111\">' + location + '</td></tr>' +\n'<tr><td style=\"color:#6b7280;font-size:13px\">Date</td><td style=\"font-weight:600;color:#111\">' + date + '</td></tr>' +\n'<tr><td style=\"color:#6b7280;font-size:13px\">Dedup</td><td style=\"font-weight:600;color:#065f46\">Duplicates auto-blocked</td></tr>' +\n'</table>' +\n\n'<div style=\"font-size:15px;font-weight:700;color:#111;margin-bottom:10px\">Top 5 Leads by Score</div>' +\n'<table style=\"width:100%;border-collapse:collapse;font-size:13px\">' +\n'<thead><tr style=\"background:#1e3a5f\">' +\n'<th style=\"padding:10px 12px;text-align:left;color:#fff\">Business</th>' +\n'<th style=\"padding:10px 12px;text-align:left;color:#fff\">Phone</th>' +\n'<th style=\"padding:10px 12px;text-align:left;color:#fff\">Website</th>' +\n'<th style=\"padding:10px 12px;text-align:center;color:#fff\">Rating</th>' +\n'<th style=\"padding:10px 12px;text-align:center;color:#fff\">Score</th>' +\n'<th style=\"padding:10px 12px;color:#fff\">Maps</th>' +\n'</tr></thead>' +\n'<tbody>' + rows + '</tbody>' +\n'</table>' +\n\n'<div style=\"margin-top:18px;padding:14px;background:#f0fdf4;border-radius:8px;border-left:4px solid #22c55e;font-size:13px;color:#166534\">' +\nleads.length + ' new leads saved to Google Sheets | Full CSV attached' +\n'</div>' +\n'</div>' +\n\n'<div style=\"background:#f8fafc;padding:14px 32px;border-top:1px solid #f1f5f9;text-align:center;font-size:11px;color:#9ca3af\">' +\n'Powered by n8n' +\n'</div>' +\n'</div>' +\n'</body></html>';\n\nreturn [{ json: { html: html, totalLeads: leads.length, keyword: keyword, location: location, date: date } }];"
+      },
+      "id": "653c6844-7d74-4e58-a734-b64d3f6ab404",
+      "name": "Build Email HTML",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1024,
+        224
+      ],
+      "notes": "Builds the rich HTML email with stats, top 5 table, and quality breakdown."
+    },
+    {
+      "parameters": {
+        "sendTo": "nextgenhustleai7@gmail.com",
+        "subject": "mail",
+        "message": "=🗺️ {{ $json.totalLeads }} New Leads — {{ $json.html }} {{ $json.keyword }} in {{ $json.location }} ({{ $json.date }})",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1248,
+        224
+      ],
+      "id": "76900b32-778c-4dc2-92ea-55963daa0367",
+      "name": "Send a message1",
+      "webhookId": "c4b95c53-25c9-4a99-9763-7d5254640e45",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "2DrLzAftNgNF5dNu",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Fix phone numbers to prevent formula errors\nconst items = $input.all();\n\nitems.forEach(item => {\n  if (item.json.phone) {\n    let phone = $input.first().json.phoneNumber;\n    \n    // Add single quote prefix to force text format\n    // This prevents Sheets from interpreting as formula\n    if (phone.startsWith('+') || phone.startsWith('=') || phone.startsWith('-')) {\n      item.json.phone = \"'\" + phone;\n    }\n  }\n});\n\nreturn items;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1888,
+        544
+      ],
+      "id": "9889255f-76c3-4537-bb0c-76f7c21dee04",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1UGWh4EKq4E9hsPp0WA7ITtvFbZU1NwNo5632p-GGHZs",
+          "mode": "list",
+          "cachedResultName": "Copy of chintu's leads experimental",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1UGWh4EKq4E9hsPp0WA7ITtvFbZU1NwNo5632p-GGHZs/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 347594701,
+          "mode": "list",
+          "cachedResultName": "Chintu's Leads",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1UGWh4EKq4E9hsPp0WA7ITtvFbZU1NwNo5632p-GGHZs/edit#gid=347594701"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Business Name": "={{ $json.businessName }}",
+            "Phone Number": "={{ $json.phoneNumber }}",
+            "Address": "={{ $json.address }}",
+            "Scraped Data": "={{ $json.scrapedDate }}",
+            "Place Key": "={{ $json.placeKey }}",
+            "Google Maps Link": "={{ $json.mapsLink }}",
+            "Lead Quality": "={{ $json.leadQuality }}",
+            "Lead Score": "={{ $json.leadScore }}",
+            "Location": "={{ $json.location }}",
+            "Keyword Search": "={{ $json.keyword }}",
+            "Total Reviews": "={{ $json.totalReviews }}",
+            "Rating": "={{ $json.rating }}",
+            "Website": "={{ $json.website }}",
+            "Email": "={{ $json.email }}",
+            "Email Status": "={{ $json.emailStatus }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Business Name",
+              "displayName": "Business Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Address",
+              "displayName": "Address",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Phone Number",
+              "displayName": "Phone Number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Email Status",
+              "displayName": "Email Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Email",
+              "displayName": "Email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Website",
+              "displayName": "Website",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Rating",
+              "displayName": "Rating",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Total Reviews",
+              "displayName": "Total Reviews",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Keyword Search",
+              "displayName": "Keyword Search",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Location",
+              "displayName": "Location",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Lead Score",
+              "displayName": "Lead Score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Lead Quality",
+              "displayName": "Lead Quality",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Google Maps Link",
+              "displayName": "Google Maps Link",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Place Key",
+              "displayName": "Place Key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Scraped Data",
+              "displayName": "Scraped Data",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "f980e857-a482-482f-bbd8-5bf6acb020f3",
+      "name": "1st Note Down",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.4,
+      "position": [
+        352,
+        320
+      ],
+      "executeOnce": false,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "GUvRYqWys11E6CMz",
+          "name": "Google Sheets account"
+        }
+      },
+      "notes": "Reads all existing rows from your Sheet to power duplicate detection.\nReplace YOUR_GOOGLE_SHEET_ID."
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1UGWh4EKq4E9hsPp0WA7ITtvFbZU1NwNo5632p-GGHZs",
+          "mode": "list",
+          "cachedResultName": "Copy of chintu's leads experimental",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1UGWh4EKq4E9hsPp0WA7ITtvFbZU1NwNo5632p-GGHZs/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 347594701,
+          "mode": "list",
+          "cachedResultName": "Chintu's Leads",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1UGWh4EKq4E9hsPp0WA7ITtvFbZU1NwNo5632p-GGHZs/edit#gid=347594701"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -1888,
+        768
+      ],
+      "id": "8eab981f-e282-4ce8-b658-b8abd66d851c",
+      "name": "Get row(s) in sheet",
+      "executeOnce": false,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "GUvRYqWys11E6CMz",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// IDENTIFY & BLOCK DUPLICATES — FINAL\n// Reads lead data directly from Filter Valid Leads node\n// Removes duplicates within the incoming batch\n// Also checks against existing sheet data to avoid re-saving\n// Passes ONLY unique new leads to the next node\n// IF node after this checks: has leads? → Sheet, else → Stop\n// ============================================================\n\nconst allLeads = $input.all();\n\n// Safety check\nif (!allLeads || allLeads.length === 0) {\n  return [{ json: { \n    _noLeads: true, \n    message: 'No leads received from Filter node', \n    count: 0 \n  }}];\n}\n\n// ── STEP 1: Read existing sheet data to avoid re-saving ──\nlet existingSheetRows = [];\ntry {\n  existingSheetRows = $('Get row(s) in sheet').all();\n} catch (e) {\n  // Sheet empty or not executed yet — treat as first run\n  existingSheetRows = [];\n}\n\n// ── STEP 2: Build lookup sets from EXISTING sheet data ──\nconst existingPhones    = new Set();\nconst existingEmails    = new Set();\nconst existingNames     = new Set();\nconst existingPlaceKeys = new Set();\n\nfor (const row of existingSheetRows) {\n  const data = (row && row.json) ? row.json : {};\n\n  const phone    = (data['Phone Number']  || '').toString().replace(/[^0-9]/g, '').toLowerCase().trim();\n  const email    = (data['Email']          || '').toString().trim().toLowerCase();\n  const name     = (data['Business Name']  || '').toString().trim().toLowerCase();\n  const placeKey = (data['Place Key']      || '').toString().trim().toLowerCase();\n\n  if (phone.length >= 7)                                       existingPhones.add(phone);\n  if (email    && email    !== 'not found' && email    !== '') existingEmails.add(email);\n  if (name     && name     !== 'n/a'       && name     !== '') existingNames.add(name);\n  if (placeKey && placeKey !== 'n/a'       && placeKey !== '') existingPlaceKeys.add(placeKey);\n}\n\n// ── STEP 3: Also track duplicates WITHIN the incoming batch ──\n// So if Apify returns same business twice, only first one passes\nconst batchPhones    = new Set();\nconst batchEmails    = new Set();\nconst batchNames     = new Set();\nconst batchPlaceKeys = new Set();\n\nconst uniqueLeads  = [];\nconst blockedLeads = [];\n\nfor (const item of allLeads) {\n  const lead = (item && item.json) ? item.json : {};\n\n  const phone    = (lead.phoneNumber  || '').toString().replace(/[^0-9]/g, '').toLowerCase().trim();\n  const email    = (lead.email         || '').toString().trim().toLowerCase();\n  const name     = (lead.businessName  || '').toString().trim().toLowerCase();\n  const placeKey = (lead.placeKey      || '').toString().trim().toLowerCase();\n\n  // Skip empty leads\n  if (!name && !phone && !email && !placeKey) continue;\n\n  // ── Check against EXISTING sheet data ──\n  const dupInSheet =\n    (phone.length >= 7            && existingPhones.has(phone))    ||\n    (email    && email    !== 'not found' && existingEmails.has(email))   ||\n    (name     && name     !== 'n/a'       && existingNames.has(name))     ||\n    (placeKey && placeKey !== 'n/a'       && existingPlaceKeys.has(placeKey));\n\n  // ── Check against CURRENT BATCH (avoid saving same lead twice) ──\n  const dupInBatch =\n    (phone.length >= 7            && batchPhones.has(phone))    ||\n    (email    && email    !== 'not found' && batchEmails.has(email))   ||\n    (name     && name     !== 'n/a'       && batchNames.has(name))     ||\n    (placeKey && placeKey !== 'n/a'       && batchPlaceKeys.has(placeKey));\n\n  if (dupInSheet || dupInBatch) {\n    // Block this lead — it's a duplicate\n    blockedLeads.push(lead.businessName || 'Unknown');\n  } else {\n    // Unique lead — passes through to Sheet node\n    uniqueLeads.push({ json: { ...lead, isNew: true } });\n\n    // Add to batch tracking sets\n    if (phone.length >= 7)                                       batchPhones.add(phone);\n    if (email    && email    !== 'not found' && email    !== '') batchEmails.add(email);\n    if (name     && name     !== 'n/a'       && name     !== '') batchNames.add(name);\n    if (placeKey && placeKey !== 'n/a'       && placeKey !== '') batchPlaceKeys.add(placeKey);\n  }\n}\n\n// ── STEP 4: Return results ──\n\n// No unique leads at all — everything was a duplicate\nif (uniqueLeads.length === 0) {\n  return [{ json: {\n    _noLeads:      true,\n    message:       'All ' + allLeads.length + ' leads were duplicates — nothing new to save',\n    totalReceived: allLeads.length,\n    blocked:       blockedLeads.length,\n    passed:        0,\n    blockedNames:  blockedLeads\n  }}];\n}\n\n// Return only unique leads — these go to Sheet node\n// Each item is a clean lead ready to be saved\nreturn uniqueLeads;"
+      },
+      "id": "6bc363c7-3169-4070-90c9-44cae8dfedd0",
+      "name": "Identify Duplicate Row Numbers",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -768,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "delete",
+        "documentId": {
+          "__rl": true,
+          "value": "1UGWh4EKq4E9hsPp0WA7ITtvFbZU1NwNo5632p-GGHZs",
+          "mode": "list",
+          "cachedResultName": "Copy of chintu's leads experimental",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1UGWh4EKq4E9hsPp0WA7ITtvFbZU1NwNo5632p-GGHZs/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 347594701,
+          "mode": "list",
+          "cachedResultName": "Chintu's Leads",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1UGWh4EKq4E9hsPp0WA7ITtvFbZU1NwNo5632p-GGHZs/edit#gid=347594701"
+        },
+        "startIndex": "={{ $json.rowNumbers }}"
+      },
+      "id": "6355c1e8-29a6-4bce-83e6-046877f52ecd",
+      "name": "Delete Duplicate Rows",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        352,
+        128
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "GUvRYqWys11E6CMz",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 2
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        128,
+        128
+      ],
+      "id": "8ba048ce-e8e4-4d7f-860b-96e3f8e0fafc",
+      "name": "Wait",
+      "webhookId": "a56ade8a-f1ab-49cc-8533-24708a303e36"
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "rowNumbers",
+        "include": "allOtherFields",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        -320,
+        128
+      ],
+      "id": "2871ab2e-d4ec-45d0-b8f1-edf738d5dea7",
+      "name": "Split Out"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const currentBatch = $input.item.json;\n\nconst batchNumber  = currentBatch.batchNumber  || 0;\nconst totalBatches = currentBatch.totalBatches || 0;\nconst rowNumbers   = currentBatch.rowNumbers   || [];\nconst batchSize    = rowNumbers.length;\n\nif (!rowNumbers || rowNumbers.length === 0) {\n  return {\n    batchNumber,\n    totalBatches,\n    success:       false,\n    message:       'Batch ' + batchNumber + ' is empty — skipped',\n    rowNumbers:    [],\n    readyToDelete: false\n  };\n}\n\nreturn {\n  batchNumber,\n  totalBatches,\n  batchSize,\n  rowNumbers,\n  success:       true,\n  startIndex:    rowNumbers[0] - 1,\n  endIndex:      rowNumbers[rowNumbers.length - 1] - 1,\n  message:       'Batch ' + batchNumber + ' of ' + totalBatches + ' ready — deleting ' + batchSize + ' rows',\n  readyToDelete: true\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -96,
+        128
+      ],
+      "id": "4d11d4f2-e60e-4d7d-a317-057b2aa2f5ba",
+      "name": "Code in JavaScript1"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "id-1",
+              "leftValue": "=={{ $json._noLeads }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              },
+              "rightValue": 0
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -544,
+        224
+      ],
+      "id": "eb9ed00b-8f22-4eb4-a7d9-729f872ccc7b",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "mode": "chooseBranch"
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        -1888,
+        -96
+      ],
+      "id": "abae6c93-d422-42e5-b665-f2589e5ded1c",
+      "name": "Merge"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Form Trigger — Lead Search": {
+      "main": [
+        [
+          {
+            "node": "Prepare Search Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Search Query": {
+      "main": [
+        [
+          {
+            "node": "Apify — Scrape Google Maps (FREE)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apify — Scrape Google Maps (FREE)": {
+      "main": [
+        [
+          {
+            "node": "Extract & Score Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract & Score Leads": {
+      "main": [
+        [
+          {
+            "node": "Filter Valid Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Valid Leads": {
+      "main": [
+        [
+          {
+            "node": "Identify Duplicate Row Numbers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate for Email + CSV": {
+      "main": [
+        [
+          {
+            "node": "📁 Export as CSV",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📁 Export as CSV": {
+      "main": [
+        [
+          {
+            "node": "Build Email HTML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Email HTML": {
+      "main": [
+        [
+          {
+            "node": "Send a message1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        []
+      ]
+    },
+    "1st Note Down": {
+      "main": [
+        [
+          {
+            "node": "Aggregate for Email + CSV",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get row(s) in sheet": {
+      "main": [
+        []
+      ]
+    },
+    "Identify Duplicate Row Numbers": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Delete Duplicate Rows": {
+      "main": [
+        [
+          {
+            "node": "Aggregate for Email + CSV",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "Delete Duplicate Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Out": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript1": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Split Out",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "1st Note Down",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "a1a087a8-0494-4679-a806-21b84badb0dc",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "4b44e41c427b0dbdd502233467d6b8629bf69bfae370f4b461d4bdb3a554d85c"
+  },
+  "id": "9HKCWBIelOUDnbQX",
+  "tags": []
+}
